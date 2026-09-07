@@ -16,7 +16,7 @@ PORT = 8765
 HR_BASES = [
     "https://api.heyreach.io/api/public",
 ]
-SERVE_DIR = Path.home()
+SERVE_DIR = Path(__file__).resolve().parent  # serve the repo, not the home directory
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):

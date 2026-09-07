@@ -664,6 +664,54 @@ tfoot td:last-child { border-right: none; }
   color: #ffffff;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Daily connection quota (fillometer) ── */
+.quota-panel {
+  background: var(--surf);
+  border: 1px solid var(--brd);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+.quota-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }
+.quota-title { font-size:13px; font-weight:600; color:var(--t1); }
+.quota-sub { font-size:11px; color:var(--t2); margin-top:3px; line-height:1.45; }
+.quota-pill {
+  font-size:11px; font-weight:700; padding:4px 10px; border-radius:999px;
+  white-space:nowrap; border:1px solid transparent;
+}
+.quota-pill.q-ok   { color:var(--c-fin);   background:rgba(78,166,118,0.12);  border-color:rgba(78,166,118,0.30); }
+.quota-pill.q-risk { color:var(--c-fail);  background:rgba(217,107,100,0.12); border-color:rgba(217,107,100,0.30); }
+.quota-pill.q-unk  { color:var(--c-pause); background:rgba(217,168,78,0.12);  border-color:rgba(217,168,78,0.30); }
+
+.quota-rows { display:flex; flex-direction:column; gap:9px; }
+.quota-row { display:grid; grid-template-columns:152px 1fr 172px 76px; align-items:center; gap:12px; }
+.quota-name {
+  display:flex; align-items:center; gap:7px; min-width:0;
+  font-size:12px; color:var(--t1); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.quota-bar { display:flex; height:10px; border-radius:5px; overflow:hidden; background:var(--bar-bg); }
+.qseg { height:100%; }
+.qseg.q-sent { background:var(--c-run); }
+.qseg.q-cov  { background:var(--c-conn); opacity:.55; }
+.qseg.q-gap  { background:repeating-linear-gradient(45deg,
+                 rgba(217,107,100,.95) 0 4px, rgba(217,107,100,.45) 4px 8px); }
+.quota-nums { font-size:11px; color:var(--t2); font-variant-numeric:tabular-nums; }
+.quota-nums b { color:var(--t1); font-weight:700; }
+.quota-flag { font-size:11px; font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
+.quota-flag.q-ok   { color:var(--t3); }
+.quota-flag.q-risk { color:var(--c-fail); }
+.quota-flag.q-unk  { color:var(--c-pause); }
+.quota-legend {
+  display:flex; flex-wrap:wrap; gap:14px; margin-top:13px; padding-top:11px;
+  border-top:1px solid var(--brd); font-size:10.5px; color:var(--t3);
+}
+.quota-legend span { display:flex; align-items:center; gap:5px; }
+.quota-key { width:9px; height:9px; border-radius:2px; display:inline-block; flex:none; }
+@media (max-width: 820px) {
+  .quota-row { grid-template-columns:112px 1fr 74px; }
+  .quota-nums { display:none; }
+}
 </style>
 </head>
 <body>
@@ -711,6 +759,8 @@ tfoot td:last-child { border-right: none; }
 <div class="dash-card">
 
 <div class="kpi-row" id="kpiRow"></div>
+
+<div class="quota-panel" id="quotaPanel" style="display:none"></div>
 
 <div class="dash-section-border">
   <div class="filters" id="filters"></div>
@@ -761,6 +811,7 @@ tfoot td:last-child { border-right: none; }
 
 <script>
 const DATA = [];
+let CAPACITY = null;
 
 const SENDER_COLORS = [
   '#4a7fc1', // blue
@@ -788,6 +839,110 @@ let activeFilter = 'ALL';
 let selectedSenders = null;
 let sortKey = 'status';
 let sortAsc = false;
+
+/* ── Daily connection quota (fillometer) ──
+   Answers one question per sender: is there enough lead inventory left to fill today's
+   connection-request limit? Bar width is that sender's daily limit, split three ways —
+   already sent, covered by queued leads, and the gap with no leads behind it. */
+function renderQuota() {
+  const el = document.getElementById('quotaPanel');
+  if (!el) return;
+  if (!CAPACITY || CAPACITY.error || !(CAPACITY.senders ?? []).length) {
+    // With a workspace on screen, say why the panel is empty rather than rendering nothing,
+    // which just looks like a broken page. Two different reasons, two different fixes:
+    // a cached sync from before this panel existed, or the proxy routes not being deployed.
+    if (DATA.length) {
+      const [msg, pill] = CAPACITY?.error
+        ? [`Could not load quota data — ${CAPACITY.error}`, 'unavailable']
+        : [`Not loaded yet — hit \u21bb to fetch today's send counts and per-sender limits.`, 'needs a refresh'];
+      el.style.display = '';
+      el.innerHTML = `<div class="quota-head"><div>
+          <div class="quota-title">Daily connection quota</div>
+          <div class="quota-sub">${msg}</div>
+        </div><div class="quota-pill q-unk">${pill}</div></div>`;
+      return;
+    }
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = '';
+
+  // Worst first: biggest shortfall, then anything we could not measure, then the rest.
+  const senders = [...CAPACITY.senders].sort((a, b) =>
+    (b.shortfall ?? -1) - (a.shortfall ?? -1) || a.name.localeCompare(b.name));
+
+  const measured   = senders.filter(s => s.sentToday !== null);
+  const totalLimit = measured.reduce((t, s) => t + s.dailyLimit, 0);
+  const totalSent  = measured.reduce((t, s) => t + s.sentToday, 0);
+  const totalQueued = senders.reduce((t, s) => t + s.queued, 0);
+  const atRisk     = senders.filter(s => (s.shortfall ?? 0) > 0);
+  const totalShort = atRisk.reduce((t, s) => t + s.shortfall, 0);
+  const unmeasured = senders.length - measured.length + senders.filter(s => s.blockedReason).length;
+
+  const pill = totalShort > 0
+    ? `<div class="quota-pill q-risk">re-up ${totalShort} lead${totalShort === 1 ? '' : 's'}</div>`
+    : unmeasured > 0
+      ? `<div class="quota-pill q-unk">${unmeasured} sender${unmeasured === 1 ? '' : 's'} need a look</div>`
+      : `<div class="quota-pill q-ok">quota covered</div>`;
+
+  const rows = senders.map(s => {
+    const limit = Math.max(s.dailyLimit, 1);
+    const sent  = s.sentToday ?? 0;
+    // With today's sends unknown, still show inventory against the whole limit — the panel's
+    // question is "are there leads?", and a flat empty bar would read as "nothing queued".
+    const cov   = s.sentToday === null
+      ? Math.min(s.queued, s.dailyLimit)
+      : Math.min(s.queued, Math.max(0, s.dailyLimit - sent));
+    const gap   = s.shortfall ?? 0;
+    const pct   = n => `${(Math.min(n, limit) / limit * 100).toFixed(1)}%`;
+    const first = s.name.split(' ')[0];
+
+    const flag = s.blockedReason
+      ? `<div class="quota-flag q-unk" title="${s.blockedReason}">blocked</div>`
+      : s.sentToday === null
+        ? `<div class="quota-flag q-unk" title="today's stats could not be read">no data</div>`
+        : gap > 0
+          ? `<div class="quota-flag q-risk">re-up ${gap}</div>`
+          : `<div class="quota-flag q-ok">covered</div>`;
+
+    const nums = s.sentToday === null
+      ? `stats unavailable · ${s.queued.toLocaleString()} queued`
+      : `<b>${sent}</b>/${s.dailyLimit} sent · ${s.queued.toLocaleString()} queued`;
+
+    const tip = s.blockedReason
+      ? `${s.name}: ${s.blockedReason} — adding leads will not fix this`
+      : `${s.name}: ${sent} sent, ${cov} more covered by queued leads, ${gap} short of a ${s.dailyLimit}/day limit`;
+
+    return `<div class="quota-row">
+      <div class="quota-name"><span class="sender-badge" style="background:${senderColor(s.name)}">${first}</span>${s.name}</div>
+      <div class="quota-bar" title="${tip}">
+        <div class="qseg q-sent" style="width:${pct(sent)}"></div>
+        <div class="qseg q-cov"  style="width:${pct(cov)}"></div>
+        <div class="qseg q-gap"  style="width:${pct(gap)}"></div>
+      </div>
+      <div class="quota-nums">${nums}</div>
+      ${flag}
+    </div>`;
+  }).join('');
+
+  const n = CAPACITY.activeCampaigns;
+  el.innerHTML = `
+    <div class="quota-head">
+      <div>
+        <div class="quota-title">Daily connection quota</div>
+        <div class="quota-sub">${totalSent.toLocaleString()} of ${totalLimit.toLocaleString()} connection requests sent today · ${totalQueued.toLocaleString()} leads queued across ${n} active campaign${n === 1 ? '' : 's'}</div>
+      </div>
+      ${pill}
+    </div>
+    <div class="quota-rows">${rows}</div>
+    <div class="quota-legend">
+      <span><i class="quota-key" style="background:var(--c-run)"></i>sent today</span>
+      <span><i class="quota-key" style="background:var(--c-conn);opacity:.55"></i>covered by queued leads</span>
+      <span><i class="quota-key" style="background:var(--c-fail)"></i>short — nothing left to send</span>
+      <span style="margin-left:auto">bar width = that sender\u2019s daily limit</span>
+    </div>`;
+}
 
 /* ── KPI ── */
 function buildKPIs() {
@@ -1172,6 +1327,7 @@ function switchWorkspace(id) {
 
   if (id === DEMO_ID) {
     DATA.length = 0;
+    CAPACITY = null;
     document.getElementById('syncLabel').textContent = 'No workspace — add one via ⚙';
     document.getElementById('syncStatus').textContent = '';
     document.getElementById('syncStatus').className = 'sync-status';
@@ -1181,11 +1337,12 @@ function switchWorkspace(id) {
       loadWorkspaceData(ws);
     }
   }
-  buildKPIs(); buildFilters(); renderTable();
+  buildKPIs(); renderQuota(); buildFilters(); renderTable();
 }
 
 function loadWorkspaceData(ws) {
   DATA.length = 0;
+  CAPACITY = ws.capacity ?? null;
   ws.data.forEach(d => DATA.push(d));
   const t = ws.lastSync ? new Date(ws.lastSync).toLocaleString() : 'never';
   document.getElementById('syncLabel').textContent = ws.name + ' · ' + new Date(ws.lastSync).toLocaleDateString();
@@ -1209,10 +1366,11 @@ async function refreshActive() {
 
   try {
     ws.data = await fetchCampaigns(ws.key);
+    ws.capacity = await fetchCapacity(ws.key, ws.data);
     ws.lastSync = Date.now();
     saveWsStore();
     loadWorkspaceData(ws);
-    buildKPIs(); buildFilters(); renderTable();
+    buildKPIs(); renderQuota(); buildFilters(); renderTable();
   } catch(e) {
     document.getElementById('syncStatus').textContent = 'Error: ' + e.message;
     document.getElementById('syncStatus').className = 'sync-status sync-err';
@@ -1234,6 +1392,69 @@ async function hrPost(apiKey, path, body = {}) {
     throw new Error(`HTTP ${res.status} on POST ${url}${txt ? ' → ' + txt.slice(0,120) : ''}`);
   }
   return res.json();
+}
+
+/* ── Today's connection capacity, per sender ──
+   queuedBySender is already tallied during the campaign lead pass, so this costs only one
+   li_account call plus one stats call per sender. */
+async function fetchCapacity(apiKey, campaigns) {
+  const active = campaigns.filter(c => c.status === 'IN_PROGRESS');
+
+  let accounts;
+  try {
+    accounts = (await hrPost(apiKey, '/li_account/GetAll', { offset: 0, limit: 100 })).items ?? [];
+  } catch (err) {
+    // This panel is additive, so a failure here must never take the campaign table down with
+    // it. A deployment without the api/li_account and api/stats proxy routes lands right here.
+    return { senders: [], activeCampaigns: active.length, error: err.message, fetchedAt: Date.now() };
+  }
+
+  const queued = {};
+  for (const c of active) {
+    for (const [sid, count] of Object.entries(c.queuedBySender ?? {})) {
+      queued[sid] = (queued[sid] ?? 0) + count;
+    }
+  }
+
+  // UTC day is equivalent to the sending day here: nothing sends between midnight and 14:00 UTC.
+  const day = new Date().toISOString().slice(0, 10);
+
+  const senders = await Promise.all(accounts.filter(a => a.isActive).map(async a => {
+    const limits = a.accountLimits ?? {};
+    // HeyReach's own spelling — the 'n' really is missing from connectioRequestLimit
+    const dailyLimit = limits.connectioRequestLimit ?? 0;
+
+    let sentToday = null;
+    try {
+      const stats = await hrPost(apiKey, '/stats/GetOverallStats', {
+        accountIds: [a.id], campaignIds: [],
+        startDate: `${day}T00:00:00.000Z`, endDate: `${day}T23:59:59.999Z`,
+      });
+      sentToday = Object.values(stats.byDayStats ?? {}).reduce((t, d) => t + (d.connectionsSent ?? 0), 0);
+    } catch (_) {
+      // Leave it null so the row reads "no data" rather than showing a false shortfall.
+    }
+
+    const q = queued[a.id] ?? 0;
+    const blockedReason = !a.authIsValid ? 'LinkedIn auth invalid'
+      : a.connectionRequestCooldown ? 'connection-request cooldown'
+      : (a.activeCampaigns ?? 0) === 0 ? 'not in any active campaign'
+      : null;
+
+    return {
+      id: a.id,
+      name: `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim().replace(/\s+/g, ' ') || `#${a.id}`,
+      dailyLimit,
+      sentToday,
+      queued: q,
+      blockedReason,
+      // Null rather than 0 when it cannot be judged, so "unknown" never reads as "fine".
+      shortfall: (sentToday === null || blockedReason) ? null
+        : Math.max(0, Math.max(0, dailyLimit - sentToday) - q),
+    };
+  }));
+
+  return { senders, activeCampaigns: active.length, fetchedAt: Date.now() };
 }
 
 async function fetchCampaigns(apiKey) {
@@ -1264,17 +1485,24 @@ async function fetchCampaigns(apiKey) {
       try {
         let offset = 0, total = null, connCheck = 0;
         const senderNames = new Set();
+        const queuedBySender = {};  // sender id -> leads still awaiting a connection request
         do {
           const lj = await hrPost(apiKey, '/campaign/GetLeadsFromCampaign', { campaignId: c.id, offset, limit: 100 });
           if (total === null) { total = lj.totalCount ?? 0; c.leadCount = total; }
           for (const lead of lj.items ?? []) {
-            if (lead.leadCampaignStatus === 'InSequence' && lead.leadConnectionStatus === 'None') connCheck++;
+            const atConnCheck = lead.leadCampaignStatus === 'InSequence' && lead.leadConnectionStatus === 'None';
+            if (atConnCheck) connCheck++;
+            // Awaiting a connection request = not started yet, or sitting at the conn. check gate
+            if ((atConnCheck || lead.leadCampaignStatus === 'Pending') && lead.linkedInSenderId != null) {
+              queuedBySender[lead.linkedInSenderId] = (queuedBySender[lead.linkedInSenderId] ?? 0) + 1;
+            }
             if (lead.linkedInSenderFullName) senderNames.add(lead.linkedInSenderFullName);
           }
           offset += 100;
         } while (offset < total);
         c.connCheck = connCheck;
         c.senders = [...senderNames].sort();
+        c.queuedBySender = queuedBySender;
       } catch(_) {}
     }));
   }
@@ -1287,17 +1515,24 @@ async function fetchCampaigns(apiKey) {
       try {
         let offset = 0, total = null, connCheck = 0;
         const senderNames = new Set();
+        const queuedBySender = {};  // sender id -> leads still awaiting a connection request
         do {
           const lj = await hrPost(apiKey, '/campaign/GetLeadsFromCampaign', { campaignId: c.id, offset, limit: 100 });
           if (total === null) { total = lj.totalCount ?? 0; c.leadCount = total; }
           for (const lead of lj.items ?? []) {
-            if (lead.leadCampaignStatus === 'InSequence' && lead.leadConnectionStatus === 'None') connCheck++;
+            const atConnCheck = lead.leadCampaignStatus === 'InSequence' && lead.leadConnectionStatus === 'None';
+            if (atConnCheck) connCheck++;
+            // Awaiting a connection request = not started yet, or sitting at the conn. check gate
+            if ((atConnCheck || lead.leadCampaignStatus === 'Pending') && lead.linkedInSenderId != null) {
+              queuedBySender[lead.linkedInSenderId] = (queuedBySender[lead.linkedInSenderId] ?? 0) + 1;
+            }
             if (lead.linkedInSenderFullName) senderNames.add(lead.linkedInSenderFullName);
           }
           offset += 100;
         } while (offset < total);
         c.connCheck = connCheck;
         c.senders = [...senderNames].sort();
+        c.queuedBySender = queuedBySender;
       } catch(_) {}
     }));
   }
@@ -1309,7 +1544,7 @@ async function fetchCampaigns(apiKey) {
 renderWsSelect();
 if (activeWsId !== DEMO_ID) {
   const ws = workspaces.find(w => w.id === activeWsId);
-  if (ws?.data) { loadWorkspaceData(ws); buildKPIs(); buildFilters(); renderTable(); }
+  if (ws?.data) { loadWorkspaceData(ws); buildKPIs(); renderQuota(); buildFilters(); renderTable(); }
   else switchWorkspace(DEMO_ID);
 }
 </script>

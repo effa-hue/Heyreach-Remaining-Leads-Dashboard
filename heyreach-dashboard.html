@@ -885,14 +885,17 @@ let sortAsc = false;
 function renderQuota() {
   const el = document.getElementById('quotaPanel');
   if (!el) return;
-  if (!CAPACITY || CAPACITY.error || !(CAPACITY.senders ?? []).length) {
+  const stale = CAPACITY && !CAPACITY.error && CAPACITY.schemaVersion !== CAPACITY_SCHEMA;
+  if (!CAPACITY || CAPACITY.error || stale || !(CAPACITY.senders ?? []).length) {
     // With a workspace on screen, say why the panel is empty rather than rendering nothing,
     // which just looks like a broken page. Two different reasons, two different fixes:
     // a cached sync from before this panel existed, or the proxy routes not being deployed.
     if (DATA.length) {
       const [msg, pill] = CAPACITY?.error
         ? [`Could not load quota data — ${CAPACITY.error}`, 'unavailable']
-        : [`Not loaded yet — hit \u21bb to fetch today's send counts and per-sender limits.`, 'needs a refresh'];
+        : stale
+          ? [`These numbers were cached by an older version of the dashboard and are no longer accurate — hit \u21bb to recalculate.`, 'out of date']
+          : [`Not loaded yet — hit \u21bb to fetch today's send counts and per-sender limits.`, 'needs a refresh'];
       el.style.display = '';
       el.innerHTML = `<div class="quota-head"><div>
           <div class="quota-title">Daily connection quota</div>
@@ -1559,6 +1562,12 @@ function sendsConnectionRequests(node) {
   return sendsConnectionRequests(node.conditionalNode) || sendsConnectionRequests(node.unconditionalNode);
 }
 
+/* Bump when the shape or meaning of a capacity snapshot changes, so a snapshot cached in
+   localStorage by an older build is treated as stale instead of being rendered as if current.
+   Showing numbers computed by superseded logic is worse than showing none.
+   2 = excludes non-connection-request campaigns, and credits unassigned pending leads. */
+const CAPACITY_SCHEMA = 2;
+
 async function fetchCapacity(apiKey, campaigns) {
   const active = campaigns.filter(c => c.status === 'IN_PROGRESS');
 
@@ -1642,6 +1651,7 @@ async function fetchCapacity(apiKey, campaigns) {
   }));
 
   return {
+    schemaVersion: CAPACITY_SCHEMA,
     senders,
     activeCampaigns: crCampaigns.length,
     excludedCampaigns: active.length - crCampaigns.length,

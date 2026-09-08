@@ -179,6 +179,12 @@ open http://localhost:8765/heyreach-dashboard.html
 Then add a workspace with its HeyReach key via ⚙ and hit ↻. The key is held in that browser's
 `localStorage` only.
 
+**The panel renders a cached snapshot, not live data** — each workspace keeps its last sync in
+`localStorage`, so after a code change the old numbers stay on screen until ↻ is pressed. A
+snapshot carries `schemaVersion`, and one written by an older build is refused rather than
+drawn: the panel reads *"cached by an older version… hit ↻ to recalculate"* with an **out of
+date** pill. Bump `CAPACITY_SCHEMA` whenever the meaning of the numbers changes.
+
 Because `localStorage` is scoped per origin, workspaces do not follow the dashboard to a
 different domain (or to another browser or machine). **⚙ → Move workspaces to another browser**
 exports the set as a JSON bundle to paste into the other origin's Import box. Only name and key

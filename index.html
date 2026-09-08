@@ -716,6 +716,28 @@ tfoot td:last-child { border-right: none; }
   .quota-row { grid-template-columns:112px 1fr 74px; }
   .quota-nums { display:none; }
 }
+
+/* ── Workspace transfer (export / import) ── */
+.xfer-row { display:flex; gap:8px; }
+.btn-ghost {
+  flex:1; background:var(--surf2); color:var(--t1);
+  border:1px solid var(--brd); border-radius:7px;
+  font-family:inherit; font-size:12px; font-weight:600;
+  padding:8px 12px; cursor:pointer; transition:opacity .1s;
+}
+.btn-ghost:hover { opacity:.75; }
+.xfer-panel { margin-top:12px; display:none; }
+.xfer-panel textarea {
+  width:100%; height:104px; box-sizing:border-box; resize:vertical;
+  background:var(--surf2); border:1px solid var(--brd); border-radius:7px;
+  color:var(--t1); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px; line-height:1.45; padding:8px 10px; outline:none; margin-bottom:8px;
+}
+.xfer-note { margin-top:8px; font-size:11px; line-height:1.5; color:var(--t2); }
+.xfer-warn {
+  margin-top:8px; padding:8px 10px; border-radius:6px; font-size:11px; line-height:1.5;
+  background:rgba(217,168,78,0.10); border:1px solid rgba(217,168,78,0.25); color:var(--c-pause);
+}
 </style>
 </head>
 <body>
@@ -734,6 +756,18 @@ tfoot td:last-child { border-right: none; }
     <div class="field"><label>HeyReach API Key</label><input id="wsKey" type="password" placeholder="Paste your API key"></div>
     <div class="api-error" id="apiError"></div>
     <button class="btn-primary" id="saveWsBtn" onclick="saveWorkspace()">Save &amp; Fetch Data</button>
+
+    <hr class="divider">
+    <div class="modal-section-title">Move workspaces to another browser</div>
+    <div class="xfer-row">
+      <button class="btn-ghost" onclick="exportWorkspaces()">Export</button>
+      <button class="btn-ghost" onclick="beginImport()">Import</button>
+    </div>
+    <div class="xfer-panel" id="xferPanel">
+      <textarea id="xferBox" spellcheck="false" placeholder="Paste an exported bundle here"></textarea>
+      <div class="xfer-row" id="xferActions"></div>
+      <div class="xfer-note" id="xferNote"></div>
+    </div>
   </div>
 </div>
 
@@ -1256,6 +1290,8 @@ function openSettings() {
   document.getElementById('wsName').value = '';
   document.getElementById('wsKey').value  = '';
   document.getElementById('apiError').style.display = 'none';
+  document.getElementById('xferPanel').style.display = 'none';
+  document.getElementById('xferBox').value = '';
   document.getElementById('settingsModal').classList.remove('hidden');
 }
 function closeSettings() {
@@ -1351,11 +1387,103 @@ function switchWorkspace(id) {
 function loadWorkspaceData(ws) {
   DATA.length = 0;
   CAPACITY = ws.capacity ?? null;
-  ws.data.forEach(d => DATA.push(d));
-  const t = ws.lastSync ? new Date(ws.lastSync).toLocaleString() : 'never';
-  document.getElementById('syncLabel').textContent = ws.name + ' · ' + new Date(ws.lastSync).toLocaleDateString();
-  document.getElementById('syncStatus').textContent = 'synced ' + t;
-  document.getElementById('syncStatus').className = 'sync-status sync-ok';
+  (ws.data ?? []).forEach(d => DATA.push(d));
+  // An imported workspace has never been synced, so guard the dates — new Date(null) formats
+  // as "Invalid Date", and claiming sync-ok for it would be a lie.
+  const synced = ws.lastSync ? new Date(ws.lastSync) : null;
+  document.getElementById('syncLabel').textContent =
+    ws.name + (synced ? ' · ' + synced.toLocaleDateString() : ' · never synced');
+  document.getElementById('syncStatus').textContent =
+    synced ? 'synced ' + synced.toLocaleString() : 'hit ↻ to fetch data';
+  document.getElementById('syncStatus').className = 'sync-status' + (synced ? ' sync-ok' : '');
+}
+
+/* ── Workspace transfer ──
+   Workspaces live in localStorage, which is scoped per origin, so moving the dashboard to a
+   different domain leaves them behind. These move the set across as a pasteable bundle. Only
+   name and key travel; campaign data is re-fetched on the other side. */
+function exportWorkspaces() {
+  const box = document.getElementById('xferBox');
+  document.getElementById('xferPanel').style.display = 'block';
+  document.getElementById('xferActions').innerHTML = '';
+  if (!workspaces.length) {
+    box.value = '';
+    setXferNote('No workspaces saved yet — nothing to export.');
+    return;
+  }
+  box.value = JSON.stringify({
+    kind: 'heyreach-dashboard-workspaces',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    workspaces: workspaces.map(w => ({ name: w.name, key: w.key })),
+  }, null, 2);
+  document.getElementById('xferActions').innerHTML =
+    '<button class="btn-ghost" onclick="copyXfer()">Copy to clipboard</button>';
+  setXferNote(`${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'}. This contains HeyReach API keys in plaintext — treat it like a password, and do not paste it into Slack, Notion or a ticket.`, true);
+  box.focus();
+  box.select();
+}
+
+function beginImport() {
+  const box = document.getElementById('xferBox');
+  box.value = '';
+  document.getElementById('xferPanel').style.display = 'block';
+  document.getElementById('xferActions').innerHTML =
+    '<button class="btn-ghost" onclick="importWorkspaces()">Import bundle</button>';
+  setXferNote('Paste a bundle exported from another browser or domain. Existing workspaces are kept, and a matching name has its key updated.');
+  box.focus();
+}
+
+async function copyXfer() {
+  const box = document.getElementById('xferBox');
+  try {
+    await navigator.clipboard.writeText(box.value);
+    setXferNote('Copied. Remember it holds API keys in plaintext.', true);
+  } catch (_) {
+    // Clipboard access can be refused; leaving the text selected still lets them copy it.
+    box.focus();
+    box.select();
+    setXferNote('Clipboard was blocked — the text is selected, copy it manually.', true);
+  }
+}
+
+function importWorkspaces() {
+  const raw = document.getElementById('xferBox').value.trim();
+  if (!raw) { setXferNote('Nothing to import — paste a bundle first.'); return; }
+
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) { setXferNote('That is not valid JSON: ' + err.message); return; }
+
+  // Accept a bare array too, so a hand-written list works as well as an exported bundle.
+  const incoming = Array.isArray(parsed) ? parsed : parsed?.workspaces;
+  if (!Array.isArray(incoming)) { setXferNote('No workspaces found in that bundle.'); return; }
+
+  const valid = incoming.filter(w =>
+    w && typeof w.name === 'string' && typeof w.key === 'string' && w.name.trim() && w.key.trim());
+  if (!valid.length) { setXferNote('No entries carried both a name and an API key.'); return; }
+
+  let added = 0, updated = 0;
+  for (const w of valid) {
+    const name = w.name.trim(), key = w.key.trim();
+    const existing = workspaces.find(x => x.name === name);
+    if (existing) { existing.key = key; updated++; }
+    else { workspaces.push({ id: 'ws_' + Date.now() + '_' + added, name, key, lastSync: null, data: [] }); added++; }
+  }
+  saveWsStore();
+  renderWsSelect();
+  renderWsList();
+
+  const skipped = incoming.length - valid.length;
+  setXferNote(`Imported ${added} new${updated ? `, updated ${updated}` : ''}${skipped ? `, skipped ${skipped} incomplete` : ''}. Pick one from the dropdown and hit ↻ to fetch its data.`, true);
+  document.getElementById('xferBox').value = '';
+  document.getElementById('xferActions').innerHTML = '';
+}
+
+function setXferNote(msg, warn) {
+  const el = document.getElementById('xferNote');
+  el.textContent = msg;
+  el.className = warn ? 'xfer-warn' : 'xfer-note';
 }
 
 /* ── Refresh live data for active workspace ── */

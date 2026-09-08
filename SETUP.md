@@ -160,6 +160,14 @@ open http://localhost:8765/heyreach-dashboard.html
 Then add a workspace with its HeyReach key via ⚙ and hit ↻. The key is held in that browser's
 `localStorage` only.
 
+Because `localStorage` is scoped per origin, workspaces do not follow the dashboard to a
+different domain (or to another browser or machine). **⚙ → Move workspaces to another browser**
+exports the set as a JSON bundle to paste into the other origin's Import box. Only name and key
+travel; campaign data is re-fetched there. Re-importing updates a matching name rather than
+duplicating it, and a bare `[{"name":…,"key":…}]` array is accepted as well as a full bundle.
+**The bundle holds HeyReach API keys in plaintext**, which the UI warns about — treat it like a
+password and keep it out of Slack, Notion and tickets.
+
 The deployed copy is `index.html` at https://heyreach-remaining-leads.vercel.app. The panel
 needs the two proxy routes above, so **it only appears once this is deployed** — against an
 older deployment those routes 404 and the panel reports `unavailable`. That failure is

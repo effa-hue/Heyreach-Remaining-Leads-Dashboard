@@ -110,7 +110,8 @@ def get_queued_by_sender(api_key, campaign_id):
 
 
 def get_sent_today(api_key, sender_id, now):
-    """UTC calendar day — equivalent to the ET business day, since nothing sends 00:00-14:00 UTC."""
+    """UTC calendar day. Agrees with the ET business day at the times the crons fire
+    (13:00/18:00 UTC); diverges after 20:00 ET. See the note in lib/heyreach.js."""
     day = now.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d")
     j = post(api_key, "/stats/GetOverallStats", {
         "accountIds": [sender_id], "campaignIds": [],
@@ -215,8 +216,10 @@ def render(a, st, run):
         ctx = "Opens in %s - %d connection requests planned today%s" % (
             human_duration(st["to_start"]), t["daily_limit"], short_of)
     else:
-        ctx = "%s left, %d%% through - *%d of %d* sent%s" % (
-            human_duration(st["to_end"]), st["elapsed_pct"], t["sent_today"], t["daily_limit"], short_of)
+        # human_duration is unsigned, so a closed window needs its own phrasing
+        when = ("%s left, %d%% through" % (human_duration(st["to_end"]), st["elapsed_pct"])
+                if st["to_end"] > 0 else "window closed %s ago" % human_duration(st["to_end"]))
+        ctx = "%s - *%d of %d* sent%s" % (when, t["sent_today"], t["daily_limit"], short_of)
 
     out = ["%s\n%s" % (head, ctx)]
     if at_risk:

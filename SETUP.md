@@ -19,7 +19,7 @@ shortfall         = remainingCapacity - queued    leads that must be added to fi
 | Term | Source |
 |---|---|
 | `dailyLimit` | `li_account/GetAll` → `accountLimits.connectioRequestLimit` (HeyReach's own spelling; the `n` is missing). This is the *current, ramped* limit, not the `…Max` ceiling. |
-| `sentToday` | `stats/GetOverallStats` with `accountIds:[id]` for today → sum `connectionsSent` over `byDayStats` |
+| `sentToday` | `stats/GetOverallStats` with `accountIds:[id]` for today → sum `connectionsSent` over `byDayStats`. **UTC day**, because `byDayStats` has no finer granularity. Both crons fire mid-window (13:00/18:00 UTC), where UTC day and ET business day agree; they diverge only after 20:00 ET, so a forced out-of-window run reports ~0 sent and an inflated shortfall. |
 | `queued` | `campaign/GetLeadsFromCampaign` across `IN_PROGRESS` campaigns, counting leads that are `Pending`, or `InSequence` with `leadConnectionStatus: "None"` (sitting at the connection-check gate). Same two buckets the dashboard shows as **Pending** + **Conn. Check**. |
 
 A sender with `shortfall > 0` is reported as needing a re-up. Senders blocked for a

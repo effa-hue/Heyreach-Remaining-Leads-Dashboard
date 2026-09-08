@@ -965,11 +965,12 @@ function renderQuota() {
   }).join('');
 
   const n = CAPACITY.activeCampaigns;
+  const skipped = CAPACITY.excludedCampaigns ?? 0;
   el.innerHTML = `
     <div class="quota-head">
       <div>
         <div class="quota-title">Daily connection quota</div>
-        <div class="quota-sub">${totalSent.toLocaleString()} of ${totalLimit.toLocaleString()} connection requests sent today · ${totalQueued.toLocaleString()} leads queued across ${n} active campaign${n === 1 ? '' : 's'}</div>
+        <div class="quota-sub">${totalSent.toLocaleString()} of ${totalLimit.toLocaleString()} connection requests sent today · ${totalQueued.toLocaleString()} leads queued across ${n} connection-request campaign${n === 1 ? '' : 's'}${skipped ? ` · ${skipped} not counted (no connection-request step)` : ''}</div>
       </div>
       ${pill}
     </div>
@@ -1533,6 +1534,30 @@ async function hrPost(apiKey, path, body = {}) {
 /* ── Today's connection capacity, per sender ──
    queuedBySender is already tallied during the campaign lead pass, so this costs only one
    li_account call plus one stats call per sender. */
+async function hrGet(apiKey, path) {
+  const res = await fetch(`${HR_API}${path}`, { headers: { 'X-API-KEY': apiKey } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} on GET ${path}${txt ? ' → ' + txt.slice(0,120) : ''}`);
+  }
+  return res.json();
+}
+
+/* Steps that send a message rather than a connection request. */
+const MESSAGING_NODES = new Set(['MESSAGE', 'INMAIL', 'MESSAGE_INMAIL', 'VOICE_NOTE']);
+
+/* Does this sequence open by sending a connection request? Only those consume a sender's
+   daily CR budget. A first-degree campaign targets existing connections and opens straight
+   at MESSAGE, so counting its leads would be phantom inventory that hides real shortfalls.
+   CHECK_IS_CONNECTION is a gate rather than a send, so both branches are followed. */
+function sendsConnectionRequests(node) {
+  if (!node || typeof node !== 'object') return false;
+  const type = node.nodeType;
+  if (type === 'CONNECTION_REQUEST') return true;
+  if (MESSAGING_NODES.has(type)) return false;
+  return sendsConnectionRequests(node.conditionalNode) || sendsConnectionRequests(node.unconditionalNode);
+}
+
 async function fetchCapacity(apiKey, campaigns) {
   const active = campaigns.filter(c => c.status === 'IN_PROGRESS');
 
@@ -1545,8 +1570,15 @@ async function fetchCapacity(apiKey, campaigns) {
     return { senders: [], activeCampaigns: active.length, error: err.message, fetchedAt: Date.now() };
   }
 
+  // Keep only the campaigns that actually send connection requests.
+  const sendsCr = await Promise.all(active.map(async c => {
+    try { return sendsConnectionRequests(await hrGet(apiKey, `/campaign/GetCampaignSequence?campaignId=${c.id}`)); }
+    catch (_) { return true; }  // unreadable: over-count rather than invent a shortfall
+  }));
+  const crCampaigns = active.filter((_, i) => sendsCr[i]);
+
   const queued = {};
-  for (const c of active) {
+  for (const c of crCampaigns) {
     for (const [sid, count] of Object.entries(c.queuedBySender ?? {})) {
       queued[sid] = (queued[sid] ?? 0) + count;
     }
@@ -1590,7 +1622,12 @@ async function fetchCapacity(apiKey, campaigns) {
     };
   }));
 
-  return { senders, activeCampaigns: active.length, fetchedAt: Date.now() };
+  return {
+    senders,
+    activeCampaigns: crCampaigns.length,
+    excludedCampaigns: active.length - crCampaigns.length,
+    fetchedAt: Date.now(),
+  };
 }
 
 async function fetchCampaigns(apiKey) {

@@ -83,6 +83,46 @@ def get_senders(api_key):
     return out
 
 
+MESSAGING_NODES = {"MESSAGE", "INMAIL", "MESSAGE_INMAIL", "VOICE_NOTE"}
+
+
+def get(api_key, path):
+    """GetCampaignSequence is the one endpoint that is a GET rather than a POST."""
+    req = urllib.request.Request(
+        BASE + path, headers={"X-API-KEY": api_key, "User-Agent": UA})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code < 500 and e.code != 429:
+                raise
+        except Exception:
+            if attempt == 2:
+                raise
+    raise RuntimeError("retries exhausted for %s" % path)
+
+
+def sends_connection_requests(node):
+    """Mirrors sendsConnectionRequests in lib/heyreach.js -- see the note there.
+
+    Only campaigns opening with a connection request can consume a sender's daily CR budget.
+    First-degree campaigns open at MESSAGE and must not contribute phantom inventory."""
+    if not isinstance(node, dict):
+        return False
+    t = node.get("nodeType")
+    if t == "CONNECTION_REQUEST":
+        return True
+    if t in MESSAGING_NODES:
+        return False
+    return (sends_connection_requests(node.get("conditionalNode"))
+            or sends_connection_requests(node.get("unconditionalNode")))
+
+
+def get_sequence(api_key, campaign_id):
+    return get(api_key, "/campaign/GetCampaignSequence?campaignId=%d" % campaign_id)
+
+
 def get_active_campaigns(api_key):
     items = post(api_key, "/campaign/GetAll", {"offset": 0, "limit": PAGE_SIZE}).get("items", [])
     return [{"id": c["id"], "name": c["name"]} for c in items if c.get("status") == "IN_PROGRESS"]
@@ -156,6 +196,21 @@ def assess(client, api_key, now):
         f_senders, f_camps = ex.submit(get_senders, api_key), ex.submit(get_active_campaigns, api_key)
         senders, campaigns = f_senders.result(), f_camps.result()
 
+    # Keep only campaigns that open with a connection request; see sends_connection_requests.
+    def shape(c):
+        try:
+            return (c, sends_connection_requests(get_sequence(api_key, c["id"])))
+        except Exception as e:
+            # Unreadable sequence: keep it. Over-counting only quietens an alert, whereas
+            # dropping a real CR campaign would invent one.
+            print("  warn: sequence unreadable for %s (%s), counting it anyway" % (c["id"], e))
+            return (c, True)
+
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
+        shapes = list(ex.map(shape, campaigns))
+    excluded = [c for c, cr in shapes if not cr]
+    campaigns = [c for c, cr in shapes if cr]
+
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
         per_campaign = list(ex.map(lambda c: (c, get_queued_by_sender(api_key, c["id"])), campaigns))
 
@@ -186,7 +241,7 @@ def assess(client, api_key, now):
                          shortfall=max(0, remaining - q), blocked=blocked,
                          campaigns=sorted(camps_by_sender.get(s["id"], []), key=lambda c: c["queued"])))
     return {
-        "client": client, "campaigns": campaigns, "senders": rows,
+        "client": client, "campaigns": campaigns, "excluded": excluded, "senders": rows,
         "at_risk": [r for r in rows if r["shortfall"] > 0 and not r["blocked"]],
         "blocked": [r for r in rows if r["blocked"]],
         # shortfall is summed over at-risk senders only — see the note in lib/capacity.js
@@ -223,11 +278,15 @@ def render(a, st, run):
 
     out = ["%s\n%s" % (head, ctx)]
     if at_risk:
-        out.append("\n".join(sender_line(r) for r in sorted(at_risk, key=urgency)))
+        cr_count = len(a["campaigns"])
+        out.append("\n".join(sender_line(r, cr_count) for r in sorted(at_risk, key=urgency)))
     out.append(sender_table(a["senders"]))
     if blocked:
         out.append("\U0001F7E1 Blocked - leads won't help: " +
                    ", ".join("*%s* (%s)" % (r["name"], r["blocked"]) for r in blocked))
+    if a["excluded"]:
+        out.append("%d campaign%s not counted (no connection-request step)"
+                   % (len(a["excluded"]), "" if len(a["excluded"]) == 1 else "s"))
     return "\n\n".join(out)
 
 
@@ -246,10 +305,10 @@ def sender_table(senders):
     return "```\n%s\n```" % "\n".join(rows)
 
 
-def sender_line(r):
+def sender_line(r, cr_count):
     if not r["campaigns"]:
-        where = "nothing queued in %d campaign%s" % (
-            r["active_campaigns"], "" if r["active_campaigns"] == 1 else "s")
+        where = "nothing queued across %d connection-request campaign%s" % (
+            cr_count, "" if cr_count == 1 else "s")
     else:
         c = r["campaigns"][0]
         where = "{:,} queued, thinnest {} `#{}` ({})".format(r["queued"], c["name"], c["id"], c["queued"])
@@ -351,6 +410,9 @@ def main():
             print("  SKIP - sending window already closed (--force to run anyway)")
             continue
         a = assess(c, c["api_key"], now)
+        if a["excluded"]:
+            print("\n  not counted (no connection-request step): %s"
+                  % ", ".join("%s #%d" % (x["name"], x["id"]) for x in a["excluded"]))
         print("\n%-18s%6s%6s%8s%8s%8s  %s"
               % ("sender", "limit", "sent", "queued", "capac.", "re-up", "blocked"))
         for r in a["senders"]:

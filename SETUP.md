@@ -20,7 +20,25 @@ shortfall         = remainingCapacity - queued    leads that must be added to fi
 |---|---|
 | `dailyLimit` | `li_account/GetAll` → `accountLimits.connectioRequestLimit` (HeyReach's own spelling; the `n` is missing). This is the *current, ramped* limit, not the `…Max` ceiling. |
 | `sentToday` | `stats/GetOverallStats` with `accountIds:[id]` for today → sum `connectionsSent` over `byDayStats`. **UTC day**, because `byDayStats` has no finer granularity. Both crons fire mid-window (13:00/18:00 UTC), where UTC day and ET business day agree; they diverge only after 20:00 ET, so a forced out-of-window run reports ~0 sent and an inflated shortfall. |
-| `queued` | `campaign/GetLeadsFromCampaign` across `IN_PROGRESS` campaigns, counting leads that are `Pending`, or `InSequence` with `leadConnectionStatus: "None"` (sitting at the connection-check gate). Same two buckets the dashboard shows as **Pending** + **Conn. Check**. |
+| `queued` | `campaign/GetLeadsFromCampaign` across `IN_PROGRESS` campaigns **that open with a connection request**, counting leads that are `Pending`, or `InSequence` with `leadConnectionStatus: "None"` (sitting at the connection-check gate). Same two buckets the dashboard shows as **Pending** + **Conn. Check**. |
+
+### Which campaigns count
+
+Only campaigns whose sequence **opens by sending a connection request** contribute queued
+inventory. First-degree campaigns target people the sender is already connected to and open
+straight at `MESSAGE`, so their leads can never consume a connection-request slot.
+
+This is decided by reading the sequence — `GET campaign/GetCampaignSequence`, the one HeyReach
+endpoint that is a GET — and walking it from the root: `CONNECTION_REQUEST` means yes, a
+messaging step means no, and `CHECK_IS_CONNECTION` is a gate so both branches are followed.
+**Not by campaign name**, which is not a reliable signal. If a sequence cannot be read the
+campaign is counted anyway: over-counting merely quietens an alert, whereas wrongly excluding a
+real campaign would invent one.
+
+This matters more than it sounds. Before it was added, 120 first-degree leads across four
+MakersHub campaigns were being counted as connection-request inventory — Robert Scott 69,
+Wesley Bauer 38, Charles Howe 13 — which hid two senders' shortfalls entirely and turned a real
+"4 senders short, 67 leads" into "1 sender short, 23 leads".
 
 A sender with `shortfall > 0` is reported as needing a re-up. Senders blocked for a
 *different* reason — invalid LinkedIn auth, a connection-request cooldown, or membership in

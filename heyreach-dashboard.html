@@ -24,6 +24,8 @@
   --c-conn:    #a882e0;
   --bar-bg:    rgba(255,255,255,0.08);
   --row-hover: rgba(255,255,255,0.03);
+  --q-fill:    #4ea676;
+  --q-gap:     #a82f28;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -692,10 +694,12 @@ tfoot td:last-child { border-right: none; }
 }
 .quota-bar { display:flex; height:10px; border-radius:5px; overflow:hidden; background:var(--bar-bg); }
 .qseg { height:100%; }
-.qseg.q-sent { background:var(--c-run); }
-.qseg.q-cov  { background:var(--c-conn); opacity:.55; }
+.qseg.q-sent { background:var(--q-fill); }
+.qseg.q-cov  { background:var(--q-fill); opacity:.45; }
+/* The gap keeps its hatch. Green vs red is the one pairing red-green colour blindness
+   collapses, so the distinction must not rest on hue alone. */
 .qseg.q-gap  { background:repeating-linear-gradient(45deg,
-                 rgba(217,107,100,.95) 0 4px, rgba(217,107,100,.45) 4px 8px); }
+                 var(--q-gap) 0 4px, rgba(168,47,40,.5) 4px 8px); }
 .quota-nums { font-size:11px; color:var(--t2); font-variant-numeric:tabular-nums; }
 .quota-nums b { color:var(--t1); font-weight:700; }
 .quota-flag { font-size:11px; font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
@@ -937,9 +941,9 @@ function renderQuota() {
     </div>
     <div class="quota-rows">${rows}</div>
     <div class="quota-legend">
-      <span><i class="quota-key" style="background:var(--c-run)"></i>sent today</span>
-      <span><i class="quota-key" style="background:var(--c-conn);opacity:.55"></i>covered by queued leads</span>
-      <span><i class="quota-key" style="background:var(--c-fail)"></i>short — nothing left to send</span>
+      <span><i class="quota-key" style="background:var(--q-fill)"></i>sent today</span>
+      <span><i class="quota-key" style="background:var(--q-fill);opacity:.45"></i>covered by queued leads</span>
+      <span><i class="quota-key" style="background:var(--q-gap)"></i>short — nothing left to send</span>
       <span style="margin-left:auto">bar width = that sender\u2019s daily limit</span>
     </div>`;
 }
@@ -1292,9 +1296,13 @@ async function saveWorkspace() {
 
   try {
     const data = await fetchCampaigns(key);
-    const ws = { id: 'ws_' + Date.now(), name, key, lastSync: Date.now(), data };
+    const capacity = await fetchCapacity(key, data);
+    const ws = { id: 'ws_' + Date.now(), name, key, lastSync: Date.now(), data, capacity };
     workspaces.push(ws);
     saveWsStore();
+    // renderWsSelect() first: switchWorkspace sets the <select>'s value, so the new <option>
+    // has to exist by then or the dropdown silently falls back to showing Demo Data.
+    renderWsSelect();
     switchWorkspace(ws.id);
     closeSettings();
   } catch(e) {

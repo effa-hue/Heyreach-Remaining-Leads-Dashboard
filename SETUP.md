@@ -126,9 +126,14 @@ width is that sender's daily limit, split three ways:
 
 | Segment | Meaning |
 |---|---|
-| Blue | already sent today |
-| Purple | covered by leads still queued |
-| Red hatched | the gap — quota that has no leads behind it |
+| Green, solid | already sent today |
+| Green, translucent | covered by leads still queued |
+| Dark red, hatched | the gap — quota that has no leads behind it |
+
+Green covers everything that will get sent; dark red is the shortfall. The gap keeps a hatch
+pattern deliberately: green-vs-red is precisely the pairing red-green colour blindness
+collapses, so the distinction must not rest on hue alone. `--q-fill` and `--q-gap` in the
+`:root` block are the only two values to change if the palette is revisited.
 
 The pill top-right reads **quota covered** or **re-up N leads**. A sender whose today-stats
 call fails shows `no data` with its queued inventory against the full limit rather than an

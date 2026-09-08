@@ -95,6 +95,7 @@ Set these in **Project → Settings → Environment Variables** (Production).
 | `HEYREACH_KEY_MAKERSHUB` | yes | MakersHub workspace HeyReach key |
 | `SLACK_OPS_CHANNEL` | recommended | Internal channel for failure notices. Without it, a crash is silent — and silence looks exactly like "nothing is wrong". |
 | `DASHBOARD_URL` | optional | Adds a footer link back to the dashboard. Use `https://heyreach-remaining-leads.vercel.app`. |
+| `SLACK_OVERRIDE_CHANNEL` | optional | Sends **every** client's alert here instead of its own channel. A channel id, or a **user id** to route it as a DM — `chat.postMessage` accepts a user id with only `chat:write`, so no extra scope is needed. Currently `U0BFP6A1PEK` (Effa), while the bot is not yet in the client channels. Delete the variable to go back to per-client channels; no code change. A redirected message footers "would normally post to #advance" so it is not mistaken for the client channel having been notified. |
 | `POST_ALL_CLEAR` | optional | `1` posts a green "capacity is covered" message too. Default is to stay quiet unless there is a problem. |
 
 A client whose `HEYREACH_KEY_*` is absent is skipped rather than erroring, so clients can be

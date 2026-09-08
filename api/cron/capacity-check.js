@@ -19,6 +19,11 @@ const { postMessage } = require('../../lib/slack');
  *   ?force=1    ignore the send-day / after-window guards
  *   ?run=       force 'preflight' or 'midday' framing
  *   ?client=    restrict to one client key ('advance', 'makershub')
+ *
+ * Set SLACK_OVERRIDE_CHANNEL to send every client's alert to one destination instead of the
+ * client channels -- a channel id, or a user id to route it as a DM (chat.postMessage accepts
+ * a user id with only the chat:write scope). Unset it to go back to the client channels; no
+ * code change either way.
  */
 module.exports = async function handler(req, res) {
   const secret = process.env.CRON_SECRET;
@@ -36,6 +41,7 @@ module.exports = async function handler(req, res) {
   const runOverride = q.run === 'preflight' || q.run === 'midday' ? q.run : null;
   const postAllClear = process.env.POST_ALL_CLEAR === '1';
   const token = process.env.SLACK_BOT_TOKEN;
+  const override = process.env.SLACK_OVERRIDE_CHANNEL || null;
   const now = new Date();
 
   let clients = configuredClients();
@@ -61,10 +67,11 @@ module.exports = async function handler(req, res) {
 
       try {
         const assessment = await assessClient(client);
-        const message = buildMessage({ assessment, state, run, postAllClear });
+        const message = buildMessage({ assessment, state, run, postAllClear, redirectedFrom: override ? client.slackChannelName : null });
         const summary = {
           client: client.key,
           run,
+          destination: override ? `${override} (override)` : client.slackChannelName,
           elapsedPct: state.elapsedPct,
           totals: assessment.totals,
           atRisk: assessment.atRisk.map((s) => ({ name: s.name, shortfall: s.shortfall, queued: s.queued, sentToday: s.sentToday })),
@@ -74,8 +81,9 @@ module.exports = async function handler(req, res) {
         if (!message) return { ...summary, posted: false, reason: 'nothing to warn about' };
         if (dryRun) return { ...summary, posted: false, dryRun: true, message };
 
-        const sent = await postMessage({ token, channel: client.slackChannel, ...message });
-        return { ...summary, posted: true, ts: sent.ts };
+        const channel = override ?? client.slackChannel;
+        const sent = await postMessage({ token, channel, ...message });
+        return { ...summary, posted: true, channel: sent.channel ?? channel, ts: sent.ts };
       } catch (err) {
         console.error(`[capacity-check] ${client.key} failed:`, err);
         return { client: client.key, run, error: err.message };

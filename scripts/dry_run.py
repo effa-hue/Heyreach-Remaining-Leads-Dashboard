@@ -125,7 +125,11 @@ def get_sequence(api_key, campaign_id):
 
 def get_active_campaigns(api_key):
     items = post(api_key, "/campaign/GetAll", {"offset": 0, "limit": PAGE_SIZE}).get("items", [])
-    return [{"id": c["id"], "name": c["name"]} for c in items if c.get("status") == "IN_PROGRESS"]
+    return [{"id": c["id"], "name": c["name"],
+             "account_ids": c.get("campaignAccountIds") or [],
+             # Not returned by GetLeadsFromCampaign at all; see the note in lib/heyreach.js
+             "pending": (c.get("progressStats") or {}).get("totalUsersPending") or 0}
+            for c in items if c.get("status") == "IN_PROGRESS"]
 
 
 def get_queued_by_sender(api_key, campaign_id):
@@ -221,6 +225,17 @@ def assess(client, api_key, now):
             queued[sid] += n
             camps_by_sender[sid].append({"id": camp["id"], "name": camp["name"], "queued": n})
 
+    # Even split of leads HeyReach has not handed out yet; see the note in lib/capacity.js.
+    pending_share = collections.Counter()
+    pending_total = 0
+    for camp in campaigns:
+        if not camp["pending"] or not camp["account_ids"]:
+            continue
+        pending_total += camp["pending"]
+        share = camp["pending"] / float(len(camp["account_ids"]))
+        for aid in camp["account_ids"]:
+            pending_share[aid] += share
+
     # Active senders stay in scope even with zero queued leads — that is the case to catch.
     in_scope = [s for s in senders if s["is_active"]]
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
@@ -228,7 +243,9 @@ def assess(client, api_key, now):
 
     rows = []
     for s, sent_today in zip(in_scope, sent):
-        q = queued.get(s["id"], 0)
+        assigned = queued.get(s["id"], 0)
+        new_share = int(pending_share.get(s["id"], 0))
+        q = assigned + new_share
         remaining = max(0, s["daily_limit"] - sent_today)
         blocked = None
         if not s["auth_ok"]:
@@ -237,11 +254,13 @@ def assess(client, api_key, now):
             blocked = "connection-request cooldown"
         elif s["active_campaigns"] == 0:
             blocked = "not in any active campaign"
-        rows.append(dict(s, sent_today=sent_today, queued=q, remaining=remaining,
+        rows.append(dict(s, sent_today=sent_today, queued=q, assigned_queued=assigned,
+                         pending_share=new_share, remaining=remaining,
                          shortfall=max(0, remaining - q), blocked=blocked,
                          campaigns=sorted(camps_by_sender.get(s["id"], []), key=lambda c: c["queued"])))
     return {
         "client": client, "campaigns": campaigns, "excluded": excluded, "senders": rows,
+        "pending_total": pending_total,
         "at_risk": [r for r in rows if r["shortfall"] > 0 and not r["blocked"]],
         "blocked": [r for r in rows if r["blocked"]],
         # shortfall is summed over at-risk senders only — see the note in lib/capacity.js
@@ -287,6 +306,9 @@ def render(a, st, run):
     if a["excluded"]:
         out.append("%d campaign%s not counted (no connection-request step)"
                    % (len(a["excluded"]), "" if len(a["excluded"]) == 1 else "s"))
+    if a["pending_total"]:
+        out.append("%d leads still being assigned by HeyReach, split evenly as an estimate"
+                   % a["pending_total"])
     return "\n\n".join(out)
 
 

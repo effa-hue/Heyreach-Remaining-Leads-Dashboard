@@ -946,7 +946,7 @@ function renderQuota() {
 
     const nums = s.sentToday === null
       ? `stats unavailable · ${s.queued.toLocaleString()} queued`
-      : `<b>${sent}</b>/${s.dailyLimit} sent · ${s.queued.toLocaleString()} queued`;
+      : `<b>${sent}</b>/${s.dailyLimit} sent · ${s.queued.toLocaleString()} queued${s.pendingShare ? ` (incl. ~${s.pendingShare} new)` : ''}`;
 
     const tip = s.blockedReason
       ? `${s.name}: ${s.blockedReason} — adding leads will not fix this`
@@ -966,11 +966,12 @@ function renderQuota() {
 
   const n = CAPACITY.activeCampaigns;
   const skipped = CAPACITY.excludedCampaigns ?? 0;
+  const pending = CAPACITY.pendingTotal ?? 0;
   el.innerHTML = `
     <div class="quota-head">
       <div>
         <div class="quota-title">Daily connection quota</div>
-        <div class="quota-sub">${totalSent.toLocaleString()} of ${totalLimit.toLocaleString()} connection requests sent today · ${totalQueued.toLocaleString()} leads queued across ${n} connection-request campaign${n === 1 ? '' : 's'}${skipped ? ` · ${skipped} not counted (no connection-request step)` : ''}</div>
+        <div class="quota-sub">${totalSent.toLocaleString()} of ${totalLimit.toLocaleString()} connection requests sent today · ${totalQueued.toLocaleString()} leads queued across ${n} connection-request campaign${n === 1 ? '' : 's'}${skipped ? ` · ${skipped} not counted (no connection-request step)` : ''}${pending ? ` · ${pending.toLocaleString()} still being assigned, split evenly as an estimate` : ''}</div>
       </div>
       ${pill}
     </div>
@@ -1584,6 +1585,20 @@ async function fetchCapacity(apiKey, campaigns) {
     }
   }
 
+  /* Freshly re-upped leads sit in progressStats.totalUsersPending and are NOT returned by
+     GetLeadsFromCampaign at all, so they carry no sender and no per-lead row. HeyReach hands
+     them out round-robin, so credit each of the campaign's accounts an even share. This is an
+     estimate and is labelled as one; floored, since understating inventory only risks a
+     needless nudge whereas overstating it would suppress a real warning. */
+  const pendingShare = {};
+  let pendingTotal = 0;
+  for (const c of crCampaigns) {
+    if (!c.pending || !(c.accountIds ?? []).length) continue;
+    pendingTotal += c.pending;
+    const share = c.pending / c.accountIds.length;
+    for (const id of c.accountIds) pendingShare[id] = (pendingShare[id] ?? 0) + share;
+  }
+
   // UTC day is equivalent to the sending day here: nothing sends between midnight and 14:00 UTC.
   const day = new Date().toISOString().slice(0, 10);
 
@@ -1603,7 +1618,9 @@ async function fetchCapacity(apiKey, campaigns) {
       // Leave it null so the row reads "no data" rather than showing a false shortfall.
     }
 
-    const q = queued[a.id] ?? 0;
+    const assignedQueued = queued[a.id] ?? 0;
+    const newShare = Math.floor(pendingShare[a.id] ?? 0);
+    const q = assignedQueued + newShare;
     const blockedReason = !a.authIsValid ? 'LinkedIn auth invalid'
       : a.connectionRequestCooldown ? 'connection-request cooldown'
       : (a.activeCampaigns ?? 0) === 0 ? 'not in any active campaign'
@@ -1615,6 +1632,8 @@ async function fetchCapacity(apiKey, campaigns) {
       dailyLimit,
       sentToday,
       queued: q,
+      assignedQueued,
+      pendingShare: newShare,
       blockedReason,
       // Null rather than 0 when it cannot be judged, so "unknown" never reads as "fine".
       shortfall: (sentToday === null || blockedReason) ? null
@@ -1626,6 +1645,7 @@ async function fetchCapacity(apiKey, campaigns) {
     senders,
     activeCampaigns: crCampaigns.length,
     excludedCampaigns: active.length - crCampaigns.length,
+    pendingTotal,
     fetchedAt: Date.now(),
   };
 }
@@ -1645,6 +1665,7 @@ async function fetchCampaigns(apiKey) {
     failed:     c.progressStats?.totalUsersFailed ?? 0,
     stopped:    c.progressStats?.totalUsersManuallyStopped ?? 0,
     excluded:   c.progressStats?.totalUsersExcluded ?? 0,
+    accountIds: c.campaignAccountIds ?? [],
     connCheck:  null,
     leadCount:  null,
     senders:    null,

@@ -62,7 +62,7 @@ module.exports = async function handler(req, res) {
   const results = [];
   for (const client of clients) {
     try {
-      const { threads, missingTags } = await getWinnableThreads(client);
+      const { threads, missingTags, storeError, storeConfigured } = await getWinnableThreads(client);
       const goLiveAt = Date.parse(client.followUp.goLiveAt ?? '') || 0;
       // Judged as of a fixed daily instant, not `now` -- see lib/followup.js.
       const evalAt = anchorInstant(now, client.followUp.evalHourUtc);
@@ -89,6 +89,9 @@ module.exports = async function handler(req, res) {
         evaluatedAt: new Date(evalAt).toISOString(),
         destination: override ? `${override} (override)` : client.followUp.channelName,
         winnableThreads: threads.length,
+        // Surfaced so a silently-degraded store is visible in the run output: without it,
+        // "addressed leads never come back" looks identical to "nobody has replied".
+        addressedStore: storeError ? `error: ${storeError}` : storeConfigured ? 'ok' : 'not configured',
         due: due.length,
         truncated: due.length > posting.length ? due.length - posting.length : 0,
         leads: posting.map((d) => ({

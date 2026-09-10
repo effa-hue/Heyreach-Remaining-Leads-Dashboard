@@ -100,6 +100,7 @@ Set these in **Project → Settings → Environment Variables** (Production).
 |---|---|---|
 | `CRON_SECRET` | yes | Random string, 16+ chars. Vercel sends it as `Authorization: Bearer <value>`. The handler returns 500 rather than running if it is unset, so the endpoint can never be left open. |
 | `SLACK_BOT_TOKEN` | yes | `xoxb-…`, needs the `chat:write` scope, and the bot must be invited to each channel. |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | recommended | A Vercel KV (or Upstash Redis) store, added from the Vercel dashboard → **Storage**; the integration sets both automatically. Records *when* a lead was marked Addressed, which is what lets a later reply revive the thread. `UPSTASH_REDIS_REST_URL` / `_TOKEN` work too. Leave them unset and the tracker still runs — Addressed just becomes permanent, as it was before. |
 | `SLACK_SIGNING_SECRET` | yes, for the follow-up buttons | From the Slack app's **Basic Information → App Credentials**. `api/slack/interactivity.js` is a public endpoint with no bearer token, so this signature is the only thing authenticating a button press. Without it the endpoint refuses every request. |
 | `HEYREACH_KEY_ADVANCE` | yes | Advance workspace HeyReach key |
 | `HEYREACH_KEY_MAKERSHUB` | yes | MakersHub workspace HeyReach key |
@@ -263,9 +264,10 @@ Reminders come in two shapes, because a cold winnable thread fails in two differ
 
 Each reminder carries two:
 
-**`Addressed`** tags the lead `Addressed` in HeyReach and collapses the message to a single
-line — `:white_check_mark: Resolved — Phil Slabine (Not Dorks…), addressed by @wbauer`.
-Because `Addressed` is in `excludeTags`, the next run no longer sees that thread at all.
+**`Addressed`** tags the lead `Addressed` in HeyReach, records when, and collapses the
+message to a single line — `:white_check_mark: Resolved — Phil Slabine (Not Dorks…), addressed by @wbauer`.
+The next run no longer sees that thread — unless the lead replies again, which brings it
+back (see below).
 The state lives on the lead in the inbox, where the team already looks and where it is
 visible and reversible — not in a table nobody can see. That is what keeps this stateless
 even with a button on it.
@@ -301,13 +303,35 @@ It also answers inside Slack's three-second budget by doing the tag write inline
 returning the replacement message as the response body. Deferring work until "after the
 ack" is not an option: a Vercel function is frozen the moment it responds.
 
-### One gap worth knowing
+### A reply after Addressed revives the thread
 
-A lead marked `Addressed` stays out permanently, even if they reply again later. That new
-reply still reaches the channel through the existing HeyReach "New Reply:" notification,
-so nothing is lost — but the follow-up clock will not restart until someone clears the tag.
-There is no `RemoveTags` endpoint; `lead/ReplaceTags` overwrites the whole list, or edit it
-in the HeyReach UI.
+Pressing Addressed means "handled". A lead who then writes to us has un-handled it, and
+that reply is precisely the thing the tracker exists to stop us dropping — so an addressed
+lead comes back the moment their newest inbound message is newer than the press.
+
+That needs one fact the HeyReach tag cannot carry. Manual `tags` are bare strings with no
+applied-at time (only `autoTags` have `creationTime`), so the press timestamp is recorded
+in Redis-over-HTTP — one hash per client, keyed by LinkedIn id, driven with plain `fetch`
+so `package.json` stays dependency-free. It is the tracker's only stored state; everything
+else is still recomputed from HeyReach every run.
+
+Encoding the date into the tag name (`Addressed 2026-09-11`) would have avoided storage
+entirely, and was rejected: it litters the workspace tag list with a new tag every day,
+for the team, forever.
+
+Three fallbacks, all deliberate — none of them ever chases a lead on a guess:
+
+| Situation | Behaviour |
+|---|---|
+| No store configured | Addressed is permanent, exactly as before the store existed |
+| Store read fails | Same — degrades quiet rather than flooding the channel with handled leads |
+| Tag applied by hand in the HeyReach UI (no timestamp) | Permanent; someone did that deliberately, outside this system |
+
+Each run reports which of these it is as `addressedStore: ok | not configured | error: …`,
+so a silently degraded store cannot pass for "nobody has replied".
+
+To clear the tag by hand: there is no `RemoveTags` endpoint. `lead/ReplaceTags` overwrites
+the whole list, or edit it in the HeyReach UI.
 
 ## Why there is no database
 
@@ -445,6 +469,8 @@ before the senders see any of it.
   alongside the sentiment label — no second query needed. `filters.campaignIds` also works,
   but 400s ("The campaign you are trying to open does not exist") on an id belonging to a
   different workspace than the key, which reads like the filter being unsupported.
+- **The store holds one small hash per client**, field per addressed lead. No TTL: a few
+  hundred entries is nothing, and expiry would silently make old leads permanent again.
 - **Button presses are not rate limited.** Each is one HeyReach write, and only a sender
   who can see the channel can press one, so there is nothing to throttle.
 - **Email is not covered.** MakersHub runs 7 Instantly campaigns, but Instantly has no

@@ -3,6 +3,7 @@
 const { configuredClients } = require('../../lib/clients');
 const { addLeadTags } = require('../../lib/heyreach');
 const { verifySlackSignature } = require('../../lib/slack');
+const { writeAddressed } = require('../../lib/store');
 const { buildResolvedMessage, ADDRESSED_ACTION } = require('../../lib/followup-message');
 
 /**
@@ -97,6 +98,11 @@ module.exports = async function handler(req, res) {
       profileUrl: meta.u,
       tags: [client.followUp.addressedTag],
     });
+    // Record *when*, so a later reply from this lead can revive the thread. The tag alone
+    // cannot say when it was applied. Written after the tag on purpose: a timestamp with
+    // no tag behind it would silently do nothing, whereas a tag with no timestamp still
+    // stops the chasing -- the old, safe behaviour.
+    await writeAddressed(client.key, { linkedinId: meta.li, profileUrl: meta.u });
     tagged = true;
   } catch (err) {
     // The click still resolves the message. The sender has said they dealt with it, and

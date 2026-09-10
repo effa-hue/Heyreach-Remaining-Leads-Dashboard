@@ -1,3 +1,12 @@
+# HeyReach agents
+
+Two scheduled agents share this project, `lib/` and one Slack app:
+
+- **Send-capacity warning agent** — are the senders going to run out of leads today?
+- **[Follow-up tracker](#follow-up-tracker-winnable-replies)** — which winnable replies have gone cold?
+
+---
+
 # Send-capacity warning agent
 
 Warns in each client's Slack channel when a HeyReach sender is going to end the day under
@@ -211,3 +220,174 @@ contained — the campaign table below still loads normally.
   warning posted twice. Neither corrupts anything, so no lock is used.
 - **`stats/GetOverallStats` needs its dates.** Omitting them returns all history, not today.
 - **Ignore `auth/CheckApiKey`.** It returns a non-JSON body and looks like a failure.
+
+
+---
+
+# Follow-up tracker (winnable replies)
+
+Posts one Slack message per lead when a winnable reply has gone quiet, pinging the sender
+who owns the thread. `api/cron/followup-check.js`, weekdays at 14:00 UTC (10:00 ET, as the
+sending window opens).
+
+## What counts as winnable
+
+The `Winnable` tag on the lead in the HeyReach inbox — the same tag Advance already applies
+during triage. The tracker does not grade reply text itself, and that is deliberate: a
+human tag keeps the tracker and the inbox in agreement, so untagging a lead is all it takes
+to stop the chasing.
+
+It is also more accurate than the alternative. HeyReach's own `Interested` autoTag was
+tested as a substitute and over-counts badly — it tagged "if you're selling something, I'm
+not in need" as Interested. Advance's manual tagging does not make that mistake.
+
+Leads also carrying `Not interested` or `Disqualified on facts` are dropped (`excludeTags`).
+Neither currently co-occurs with `Winnable` in Advance's inbox, so the filter costs nothing
+and means marking a lead dead is enough to end the reminders.
+
+## The two steps
+
+`7 days` → *1 week*, `11 days` → *1.5 weeks*, per client in `lib/clients.js`. Add or change
+steps freely; nothing else needs touching.
+
+Reminders come in two shapes, because a cold winnable thread fails in two different ways:
+
+| Shape | Means | Icon |
+|---|---|---|
+| **Unanswered reply** | the lead spoke last and we never answered — a dropped ball | :rotating_light: |
+| **Follow-up due** | we spoke last and they went quiet — an ordinary nudge | :hourglass_flowing_sand: |
+
+## Why there is no database
+
+The tracker stores nothing between runs, and does not need to.
+
+**Reminders stop on their own.** The clock is the newest message in the thread in *either*
+direction. The moment a sender messages the lead the age resets to zero, the remaining
+steps move into the future, and the thread stops coming up. A rep clears a reminder by
+doing the thing it asked for — the only state worth trusting. There is no button to press
+and nothing that can drift out of sync with the inbox.
+
+**Each step fires exactly once.** The run does not ask "is this overdue?" (true every day
+once true, so it would nag forever) but "did this cross a step inside the last 24h window?"
+A crossing is a single instant and falls in exactly one window.
+
+**Cron jitter cannot break that.** Vercel's Hobby crons fire anywhere inside the scheduled
+hour, so runs sit 23–25h apart. Measured against wall-clock `now`, a 24h look-back would
+skip a crossing that fell in a 24h45m gap and double-report one across a 23h gap. So the
+run judges itself as of a *fixed* instant — the most recent 14:00 UTC — which makes
+consecutive evaluations exactly 24h apart no matter when the function actually woke up.
+`evalHourUtc` in `lib/clients.js` must stay in step with the cron hour in `vercel.json`.
+
+Verified rather than asserted: `scripts/followup-selftest.js` simulates 200 daily runs at
+random minutes inside the hour against the 41 real `Winnable` threads in Advance's inbox
+and checks that every thread produces exactly one reminder per step — 82 reminders, no
+duplicates, no misses — plus the edge cases either side of the anchor instant.
+
+```
+node scripts/followup-selftest.js                       # synthetic edge cases
+node scripts/followup-selftest.js /path/to/convs.json   # plus a real inbox dump
+```
+
+## Before it can do anything: create the tag
+
+**MakersHub's inbox has only `Responded` on it. There is no `Winnable` tag yet, so the
+tracker will report nothing until one exists and is being applied.**
+
+Worth knowing: filtering by a tag that does not exist in a workspace is an HTTP 400, not an
+empty result —
+
+```
+{"errorMessage":"Cannot filter with Tags because the following tags do not exist: Winnable"}
+```
+
+That is caught and reported as a `configWarning` rather than a crash, so the cron will not
+502 and cry wolf every morning. It also posts to `SLACK_OPS_CHANNEL` once a week (Mondays)
+so "nothing to read" cannot be mistaken indefinitely for "a quiet week".
+
+To switch it on: create a `Winnable` tag in the MakersHub HeyReach workspace and apply it
+during inbox triage, the way Advance does.
+
+## The existing backlog
+
+`goLiveAt` (`2026-09-11` for MakersHub) stops the tracker replaying crossings that happened
+before it was switched on. MakersHub had 60 threads already idle past a week when this was
+built; without the cutoff every one would land in the channel on the first run.
+
+To work that backlog deliberately, use `?backfill=1`, which ignores both `goLiveAt` and the
+24h window and reports the furthest step each overdue thread has passed. It will re-report
+leads already reminded about, so dry-run it first and expect volume.
+
+## Where it posts
+
+`#kadima-makershub-responses` (`C0BMB34K2VD`) — **not** `#makershub`, which is Kadima-internal
+(Yael and Effa only). The reminders have to land where the six senders are, which is the
+same channel HeyReach already posts "New Reply:" notifications into.
+
+Senders are mapped to Slack user ids in `lib/clients.js` so the ping is a real `<@id>`
+mention. The map is keyed by **HeyReach LinkedIn account id, not by name** — HeyReach calls
+him "Charles Howe" and Slack calls him "Charley Howe", and a name-matched map would
+silently drop his reminders. If an id is missing the name is bolded instead and the
+reminder still posts.
+
+| HeyReach account | Sender | Slack |
+|---|---|---|
+| 227672 | Sam Grasso | `U087F3EA1D0` |
+| 228534 | Charles Howe | `U064CLEHZEZ` |
+| 228829 | Wesley Bauer | `U08LV8JN97X` |
+| 228966 | Sonny Singh | `U09BR825HDJ` |
+| 230914 | Robert Scott | `U094JF03PNJ` |
+| 233402 | Phong Ngo | `U06412970DV` |
+
+Invite the bot: `/invite @<app name>` in `#kadima-makershub-responses`.
+
+## Advance
+
+Configured but `enabled: false`. Advance already tags `Winnable` (41 leads today), so the
+only thing missing is somewhere to post: its senders are not in `#advance`, which has only
+the Kadima side in it, and there is no responses channel. Create one, invite the senders,
+fill in `senders` with their Slack ids, set `channel`, set `goLiveAt`, flip `enabled`.
+
+## Testing
+
+```bash
+BASE=https://<deployment>.vercel.app
+AUTH="Authorization: Bearer $CRON_SECRET"
+
+curl -s -H "$AUTH" "$BASE/api/cron/followup-check?dryRun=1" | jq .
+curl -s -H "$AUTH" "$BASE/api/cron/followup-check?dryRun=1&backfill=1&client=makershub" | jq '.results[0].leads'
+curl -s -H "$AUTH" "$BASE/api/cron/followup-check?backfill=1&limit=5"   # posts 5, for real
+```
+
+Set `SLACK_OVERRIDE_CHANNEL` to your own user id to watch a few real days land in a DM
+before the senders see any of it.
+
+| Param | Effect |
+|---|---|
+| `dryRun=1` | build the payloads, post nothing |
+| `backfill=1` | ignore `goLiveAt` and the 24h window; report everything currently overdue |
+| `client=` | restrict to one client key |
+| `limit=` | cap posts (default 25) |
+
+## Operational notes
+
+- **Cost.** One paged read of the tagged conversations per client — 1 call per 100 threads.
+  Advance's 41 `Winnable` threads are a single call. Far cheaper than the capacity check.
+- **Posting is serialised** at ~1.2s per message. `chat.postMessage` is rate limited near
+  one per second per channel and a burst is dropped rather than queued, so a `limit=25`
+  backfill takes ~30s of the 60s budget.
+- **A double-fired cron double-posts.** Vercel can occasionally fire the same schedule
+  twice; both fires resolve to the same evaluation instant and so find the same crossings.
+  The duplicate is identical and harmless, and stateless dedupe cannot rule it out — this
+  is the one case the exactly-once property does not cover.
+- **A missed run silently skips a step.** No retry, and the window has passed by the next
+  run. The lead still gets its later step; use `?backfill=1` to catch anything dropped.
+- **`filters.tags` is the right field.** `leadTags` looks plausible, is accepted with a 200,
+  and is silently ignored — it returns the entire inbox, which reads as "everything is
+  winnable" rather than as an error.
+- **Campaign attribution comes from the lead's `autoTags`**, which carry `campaignName`
+  alongside the sentiment label — no second query needed. `filters.campaignIds` also works,
+  but 400s ("The campaign you are trying to open does not exist") on an id belonging to a
+  different workspace than the key, which reads like the filter being unsupported.
+- **Email is not covered.** MakersHub runs 7 Instantly campaigns, but Instantly has no
+  equivalent winnable signal in use — `lt_interest_status` is unset on essentially every
+  lead. Once replies are graded there, the same steps and message builder apply.

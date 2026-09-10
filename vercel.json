@@ -2,9 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     { "path": "/api/cron/capacity-check", "schedule": "0 13 * * 1-5" },
-    { "path": "/api/cron/capacity-check", "schedule": "0 18 * * 1-5" }
+    { "path": "/api/cron/capacity-check", "schedule": "0 18 * * 1-5" },
+    { "path": "/api/cron/followup-check", "schedule": "0 14 * * 1-5" }
   ],
   "functions": {
-    "api/cron/capacity-check.js": { "maxDuration": 60 }
+    "api/cron/capacity-check.js": { "maxDuration": 60 },
+    "api/cron/followup-check.js": { "maxDuration": 60 }
   }
 }

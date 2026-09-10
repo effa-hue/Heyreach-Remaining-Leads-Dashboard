@@ -280,8 +280,8 @@ comes back at its next step.
 link** — its route table defines `inbox` with no id parameter and no conversation query
 param — so the best available target is the Unibox, `https://app.heyreach.io/app/inbox`,
 with the lead's name passed as `searchTerm` (the param HeyReach's list components read).
-If that filters the inbox, the sender lands on the thread; if it is ignored they land in
-the right inbox anyway. Worth spot-checking on the first click. Override per client with
+**Confirmed working 2026-09-10** — the Unibox opens filtered to that lead, so the button
+lands the sender on the thread itself. Override per client with
 `followUp.heyreachInboxUrl`.
 
 ### Wiring interactivity

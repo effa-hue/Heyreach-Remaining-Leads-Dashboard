@@ -100,6 +100,7 @@ Set these in **Project → Settings → Environment Variables** (Production).
 |---|---|---|
 | `CRON_SECRET` | yes | Random string, 16+ chars. Vercel sends it as `Authorization: Bearer <value>`. The handler returns 500 rather than running if it is unset, so the endpoint can never be left open. |
 | `SLACK_BOT_TOKEN` | yes | `xoxb-…`, needs the `chat:write` scope, and the bot must be invited to each channel. |
+| `SLACK_SIGNING_SECRET` | yes, for the follow-up buttons | From the Slack app's **Basic Information → App Credentials**. `api/slack/interactivity.js` is a public endpoint with no bearer token, so this signature is the only thing authenticating a button press. Without it the endpoint refuses every request. |
 | `HEYREACH_KEY_ADVANCE` | yes | Advance workspace HeyReach key |
 | `HEYREACH_KEY_MAKERSHUB` | yes | MakersHub workspace HeyReach key |
 | `SLACK_OPS_CHANNEL` | recommended | Internal channel for failure notices. Without it, a crash is silent — and silence looks exactly like "nothing is wrong". |
@@ -241,7 +242,8 @@ It is also more accurate than the alternative. HeyReach's own `Interested` autoT
 tested as a substitute and over-counts badly — it tagged "if you're selling something, I'm
 not in need" as Interested. Advance's manual tagging does not make that mistake.
 
-Leads also carrying `Not interested` or `Disqualified on facts` are dropped (`excludeTags`).
+Leads also carrying `Not interested`, `Disqualified on facts` or `Addressed` are dropped
+(`excludeTags`).
 Neither currently co-occurs with `Winnable` in Advance's inbox, so the filter costs nothing
 and means marking a lead dead is enough to end the reminders.
 
@@ -256,6 +258,56 @@ Reminders come in two shapes, because a cold winnable thread fails in two differ
 |---|---|---|
 | **Unanswered reply** | the lead spoke last and we never answered — a dropped ball | :rotating_light: |
 | **Follow-up due** | we spoke last and they went quiet — an ordinary nudge | :hourglass_flowing_sand: |
+
+## The two buttons
+
+Each reminder carries two:
+
+**`Addressed`** tags the lead `Addressed` in HeyReach and collapses the message to a single
+line — `:white_check_mark: Resolved — Phil Slabine (Not Dorks…), addressed by @wbauer`.
+Because `Addressed` is in `excludeTags`, the next run no longer sees that thread at all.
+The state lives on the lead in the inbox, where the team already looks and where it is
+visible and reversible — not in a table nobody can see. That is what keeps this stateless
+even with a button on it.
+
+If the tag write fails the click still resolves the message and says so
+(`could not tag in HeyReach: …`) rather than pretending it worked. Worst case the thread
+comes back at its next step.
+
+**`Open in HeyReach`** is a plain link button. HeyReach has **no per-conversation deep
+link** — its route table defines `inbox` with no id parameter and no conversation query
+param — so the best available target is the Unibox, `https://app.heyreach.io/app/inbox`,
+with the lead's name passed as `searchTerm` (the param HeyReach's list components read).
+If that filters the inbox, the sender lands on the thread; if it is ignored they land in
+the right inbox anyway. Worth spot-checking on the first click. Override per client with
+`followUp.heyreachInboxUrl`.
+
+### Wiring interactivity
+
+1. api.slack.com/apps → your Kadima app → **Interactivity & Shortcuts** → on
+2. Request URL: `https://<deployment>/api/slack/interactivity`
+3. Copy **Basic Information → Signing Secret** into `SLACK_SIGNING_SECRET`
+
+> **A Slack app has exactly one Interactivity Request URL.** If this app already points at
+> something else, that integration breaks the moment you change it. Use a separate Slack
+> app for the tracker if so.
+
+The endpoint verifies Slack's `v0=` HMAC over `v0:<timestamp>:<raw body>` and rejects
+anything older than five minutes, so a captured request cannot be replayed. It turns
+Vercel's body parser off (`config.api.bodyParser = false`) because re-encoding a parsed
+form changes the percent-escaping and the digest stops matching.
+
+It also answers inside Slack's three-second budget by doing the tag write inline and
+returning the replacement message as the response body. Deferring work until "after the
+ack" is not an option: a Vercel function is frozen the moment it responds.
+
+### One gap worth knowing
+
+A lead marked `Addressed` stays out permanently, even if they reply again later. That new
+reply still reaches the channel through the existing HeyReach "New Reply:" notification,
+so nothing is lost — but the follow-up clock will not restart until someone clears the tag.
+There is no `RemoveTags` endpoint; `lead/ReplaceTags` overwrites the whole list, or edit it
+in the HeyReach UI.
 
 ## Why there is no database
 
@@ -304,8 +356,13 @@ That is caught and reported as a `configWarning` rather than a crash, so the cro
 502 and cry wolf every morning. It also posts to `SLACK_OPS_CHANNEL` once a week (Mondays)
 so "nothing to read" cannot be mistaken indefinitely for "a quiet week".
 
-To switch it on: create a `Winnable` tag in the MakersHub HeyReach workspace and apply it
-during inbox triage, the way Advance does.
+To switch it on, create **two** tags in the MakersHub HeyReach workspace:
+
+- **`Winnable`** — applied by hand during inbox triage, the way Advance does. This is what
+  the tracker reads.
+- **`Addressed`** — written by the Slack button. Create it up front: whether `lead/AddTags`
+  creates a tag that does not yet exist could not be verified without writing to a real
+  lead in a client workspace, so do not rely on it.
 
 ## The existing backlog
 
@@ -388,6 +445,8 @@ before the senders see any of it.
   alongside the sentiment label — no second query needed. `filters.campaignIds` also works,
   but 400s ("The campaign you are trying to open does not exist") on an id belonging to a
   different workspace than the key, which reads like the filter being unsupported.
+- **Button presses are not rate limited.** Each is one HeyReach write, and only a sender
+  who can see the channel can press one, so there is nothing to throttle.
 - **Email is not covered.** MakersHub runs 7 Instantly campaigns, but Instantly has no
   equivalent winnable signal in use — `lt_interest_status` is unset on essentially every
   lead. Once replies are graded there, the same steps and message builder apply.
